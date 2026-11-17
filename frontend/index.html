@@ -31,8 +31,12 @@
   .tag.bad{background:#2a1518;color:var(--bad)}
   .login{max-width:400px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
   .err{color:var(--bad);min-height:18px;font-size:13px}
-  .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .ok-msg{color:var(--ok);min-height:18px;font-size:13px}
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .banner{border:1px solid var(--line);background:#0e1626;border-radius:10px;padding:10px 12px;font-size:13px;color:var(--muted);margin-bottom:12px}
+  .banner b{color:var(--accent)}
+  .note{color:var(--muted);font-size:12px}
 </style>
 </head>
 <body>
@@ -56,11 +60,21 @@ createApp({
     const user=ref(localStorage.getItem('slicegate_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const subs=ref([]), subsVersion=ref(0), semantics=ref(''), audit=ref([]);
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
     const releaseSliceId=ref(1), consumer=ref('ads_order');
-    const nav=['切片登记','完整度裁决','下游放行','消费水位'];
+    const subForm=ref({consumer:'',action:'订阅'}), subMsg=ref(''), subOk=ref('');
+    const nav=['切片登记','完整度裁决','订阅目录','下游放行','消费水位'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
+    const subscribedCnt=computed(()=>subs.value.filter(s=>s.status==='订阅中').length);
+    const subscribedConsumers=computed(()=>subs.value.filter(s=>s.status==='订阅中').map(s=>s.consumer));
+    const latestReleaseBySlice=computed(()=>{const m={};for(const r of releases.value){if(!(r.slice_id in m))m[r.slice_id]=r;}return m;});
+    function sliceNote(s){
+      const r=latestReleaseBySlice.value[s.id];
+      if(!r) return '—';
+      return r.status+'→'+r.consumer+(r.sub_version?(' @v'+r.sub_version):'');
+    }
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -85,13 +99,27 @@ createApp({
       releases.value=Array.isArray(rel.items)?rel.items:[];
       const w=await loadJson('/api/watermarks'); if(w===null) return;
       watermarks.value=Array.isArray(w.items)?w.items:[];
-      if(slices.value.length) releaseSliceId.value=slices.value[0].id;
+      const sub=await loadJson('/api/subscriptions'); if(sub===null) return;
+      subs.value=Array.isArray(sub.items)?sub.items:[];
+      subsVersion.value=sub.version||0; semantics.value=sub.semantics||'';
+      const au=await loadJson('/api/subscriptions/audit'); if(au===null) return;
+      audit.value=Array.isArray(au.items)?au.items:[];
+      if(slices.value.length && !slices.value.some(x=>x.id===releaseSliceId.value)) releaseSliceId.value=slices.value[0].id;
+      if(subscribedConsumers.value.length && !subscribedConsumers.value.includes(consumer.value)) consumer.value=subscribedConsumers.value[0];
     }
     async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
     async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
     async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
+    async function doSubscribe(){
+      subMsg.value='';subOk.value='';
+      const r=await fetch('/api/subscriptions',{method:'POST',headers:auth(),body:JSON.stringify({consumer:subForm.value.consumer,action:subForm.value.action,expected_version:subsVersion.value})});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){subMsg.value=j.detail||'失败';}
+      else{subOk.value=subForm.value.action+'已生效，口径版本 v'+j.version;subForm.value.consumer='';}
+      await refresh();
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,subs,subsVersion,semantics,audit,form,releaseSliceId,consumer,subForm,subMsg,subOk,actionErr,completeCnt,openCnt,subscribedCnt,subscribedConsumers,sliceNote,login,logout,createSlice,evaluate,doRelease,doSubscribe};
   },
   template:`
   <div v-if="!token" class="login">
@@ -101,7 +129,7 @@ createApp({
   </div>
   <div v-if="token">
     <div class="top">
-      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位</small></div>
+      <div class="brand">日切放行<small>切片 → 完整度 → 订阅清单 → 放行 → 水位</small></div>
       <div class="tabs"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
@@ -110,15 +138,17 @@ createApp({
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
         <div class="panel">未放行<b class="mono">{{openCnt}}</b></div>
+        <div class="panel">订阅中消费方<b class="mono">{{subscribedCnt}}</b></div>
       </div>
       <div v-show="tab===0" class="grid">
         <div class="panel">
           <h2>在途切片</h2>
-          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th></th></tr></thead>
+          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th>旁注</th><th></th></tr></thead>
           <tbody><tr v-for="s in slices" :key="s.id">
             <td class="mono">{{s.slice_no}}</td><td>{{s.biz_date}} / {{s.partition_key}}</td>
             <td class="mono">{{s.row_count}}/{{s.expected_count}}</td>
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
+            <td class="note">{{sliceNote(s)}}</td>
             <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
           </tr></tbody></table>
         </div>
@@ -139,24 +169,64 @@ createApp({
           <td>{{s.completeness}}</td><td>{{s.release_status}}</td>
         </tr></tbody></table>
       </div>
-      <div v-show="tab===2" class="grid">
+      <div v-show="tab===2">
+        <div class="banner">订阅规则簿口径（已锁定，禁止改口）：<b>{{semantics}}</b> ｜ 当前口径版本 <b class="mono">v{{subsVersion}}</b> ｜ 两名值班同时改落将加锁串行，后手收到「订阅争用」</div>
+        <div class="grid">
+          <div class="panel">
+            <h2>订阅目录</h2>
+            <table><thead><tr><th>消费方</th><th>状态</th><th>操作人</th><th>更新时间</th><th>生效版本</th></tr></thead>
+            <tbody><tr v-for="s in subs" :key="s.consumer">
+              <td class="mono">{{s.consumer}}</td>
+              <td><span class="tag" :class="{bad:s.status!=='订阅中'}">{{s.status}}</span></td>
+              <td>{{s.updated_by}}</td><td class="mono">{{s.updated_at}}</td><td class="mono">v{{s.version}}</td>
+            </tr></tbody></table>
+          </div>
+          <div class="panel">
+            <h2>变更订阅</h2>
+            <label>消费方</label><input v-model="subForm.consumer" placeholder="如 ads_order"/>
+            <label>动作</label><select v-model="subForm.action"><option>订阅</option><option>退订</option></select>
+            <button class="primary" @click="doSubscribe">按口径版本 v{{subsVersion}} 提交</button>
+            <div class="err">{{subMsg}}</div><div class="ok-msg">{{subOk}}</div>
+            <div class="note">变更与放行可见集同一事务提交，失败整笔回滚；已退订/未订阅消费方偷接放行将被拒并记「订阅口径偏了」。</div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>订阅审计（可查痕迹）</h2>
+          <table><thead><tr><th>时间</th><th>口径版本</th><th>消费方</th><th>动作</th><th>操作人</th><th>备注</th></tr></thead>
+          <tbody><tr v-for="a in audit" :key="a.id">
+            <td class="mono">{{a.created_at}}</td><td class="mono">v{{a.version}}</td><td class="mono">{{a.consumer}}</td>
+            <td><span class="tag" :class="{bad:a.action==='订阅争用'||a.action==='口径偏离拒绝'}">{{a.action}}</span></td>
+            <td>{{a.actor}}</td><td class="note">{{a.note}}</td>
+          </tr></tbody></table>
+        </div>
+      </div>
+      <div v-show="tab===3" class="grid">
         <div class="panel">
           <h2>申请放行</h2>
           <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}}）</option></select>
-          <label>下游</label><input v-model="consumer"/>
+          <label>下游（仅订阅中消费方）</label><select v-model="consumer"><option v-for="cs in subscribedConsumers" :value="cs">{{cs}}</option></select>
           <button class="primary" @click="doRelease">放行</button>
           <div class="err">{{actionErr}}</div>
+          <div class="note">未订阅或已退订消费方偷接放行将被拒，并记「订阅口径偏了」。</div>
         </div>
         <div class="panel">
-          <h2>放行流水</h2>
-          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
+          <h2>放行详情</h2>
+          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>口径版本</th><th>旁注</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="r in releases" :key="r.id">
+            <td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td>
+            <td><span class="tag" :class="{bad:r.status!=='成功'}">{{r.status}}</span></td>
+            <td class="mono">{{r.sub_version?('v'+r.sub_version):'—'}}</td>
+            <td class="note">{{r.note}}</td><td class="mono">{{r.created_at}}</td>
+          </tr></tbody></table>
         </div>
       </div>
-      <div v-show="tab===3" class="panel">
+      <div v-show="tab===4" class="panel">
         <h2>消费水位</h2>
-        <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
-        <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
+        <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th><th>关联放行</th></tr></thead>
+        <tbody><tr v-for="w in watermarks" :key="w.id">
+          <td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td>
+          <td class="mono">{{w.source_slice}}</td><td class="mono">{{w.release_id?('#'+w.release_id):'—'}}</td>
+        </tr></tbody></table>
       </div>
     </main>
   </div>`
